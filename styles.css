@@ -117,6 +117,52 @@ p {
   text-align: center;
 }
 
+.uploader__modes {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 0.75rem;
+  margin-bottom: 1.5rem;
+}
+
+.radio {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.radio input[type="radio"] {
+  width: 1rem;
+  height: 1rem;
+}
+
+.uploader__panel {
+  display: grid;
+  gap: 0.75rem;
+  justify-items: center;
+  margin-bottom: 1.5rem;
+}
+
+.uploader__inputs {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.uploader__filename {
+  font-size: 0.95rem;
+  color: var(--text-muted);
+  word-break: break-word;
+}
+
+.uploader__summary {
+  margin-top: 0.5rem;
+  color: var(--text-muted);
+}
+
 input[type="file"] {
   position: absolute;
   opacity: 0;

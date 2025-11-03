@@ -6,6 +6,8 @@ const {
   evaluateQuery,
   convertRowsToCsv,
   buildCaches,
+  normalizeParsedData,
+  extractKeywords,
   __setTestState,
   __getTestState,
 } = require('../app.js');
@@ -128,6 +130,35 @@ test('buildCaches keeps caches synchronised', () => {
   assert.strictEqual(state.rawRows.length, 4);
   assert.strictEqual(state.rowTextCache.length, 4);
   assert.ok(state.lowerRowTextCache[0].includes('alice'));
+});
+
+resetStateForTests();
+
+test('normalizeParsedData infers headers and sanitises values', () => {
+  const normalized = normalizeParsedData({
+    headers: [],
+    rows: [
+      ['Nom', 'Âge'],
+      ['Alice', 30],
+      ['Bob', null],
+    ],
+  });
+  assert.deepStrictEqual(normalized.headers, ['Nom', 'Âge']);
+  assert.deepStrictEqual(normalized.rows, [
+    ['Alice', '30'],
+    ['Bob', ''],
+  ]);
+});
+
+resetStateForTests();
+
+test('extractKeywords returns unique trimmed entries', () => {
+  const keywords = extractKeywords([
+    ['  Alpha  ', ''],
+    ['beta', 'Gamma'],
+    ['beta', null],
+  ]);
+  assert.deepStrictEqual(keywords, ['Alpha', 'beta', 'Gamma']);
 });
 
 const failed = results.filter((result) => result.status === 'failed');
