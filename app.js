@@ -1,6 +1,18 @@
 const doc = typeof document !== "undefined" ? document : null;
 const dropZone = doc ? doc.getElementById("drop-zone") : null;
 const fileInput = doc ? doc.getElementById("file-input") : null;
+const modeRadios = doc
+  ? Array.from(doc.querySelectorAll('input[name="analysis-mode"]'))
+  : [];
+const singleUploadContainer = doc ? doc.getElementById("single-upload") : null;
+const compareUploadContainer = doc ? doc.getElementById("compare-upload") : null;
+const referenceInput = doc ? doc.getElementById("reference-input") : null;
+const comparisonInput = doc ? doc.getElementById("comparison-input") : null;
+const referenceName = doc ? doc.getElementById("reference-name") : { textContent: "" };
+const comparisonName = doc
+  ? doc.getElementById("comparison-name")
+  : { textContent: "" };
+const keywordsSummary = doc ? doc.getElementById("keywords-summary") : { textContent: "" };
 const progressBar = doc ? doc.getElementById("progress-bar") : null;
 const progressLabel = doc ? doc.getElementById("progress-label") : null;
 const errorMessage = doc ? doc.getElementById("error-message") : null;
@@ -33,8 +45,14 @@ let rowTextCache = [];
 let lowerRowTextCache = [];
 let currentPage = 1;
 let currentFileName = "";
+let currentMode = "single";
+let referenceKeywords = [];
+let comparisonHeaders = [];
+let comparisonRows = [];
+let referenceFileName = "";
+let comparisonFileName = "";
 
-function resetState() {
+function resetDataset() {
   headers = [];
   rawRows = [];
   filteredRows = [];
@@ -85,61 +103,333 @@ function formatBytes(bytes) {
   return `${size.toFixed(unitIndex === 0 ? 0 : 1)} ${units[unitIndex]}`;
 }
 
-async function handleFiles(files) {
-  resetState();
-  if (!files || !files.length) return;
-  const file = files[0];
-  if (fileInput) {
+function clearComparisonState() {
+  referenceKeywords = [];
+  comparisonHeaders = [];
+  comparisonRows = [];
+  referenceFileName = "";
+  comparisonFileName = "";
+  referenceName.textContent = "";
+  comparisonName.textContent = "";
+  keywordsSummary.textContent = "";
+  if (referenceInput) {
+    referenceInput.value = "";
+  }
+  if (comparisonInput) {
+    comparisonInput.value = "";
+  }
+}
+
+function setMode(mode) {
+  if (!mode || (mode !== "single" && mode !== "compare")) {
+    return;
+  }
+  if (currentMode === mode) {
+    return;
+  }
+  currentMode = mode;
+  if (singleUploadContainer) {
+    singleUploadContainer.hidden = mode !== "single";
+  }
+  if (compareUploadContainer) {
+    compareUploadContainer.hidden = mode !== "compare";
+  }
+  resetDataset();
+  clearError();
+  updateProgress(0, "");
+  if (mode === "single") {
+    clearComparisonState();
+    if (fileInput) {
+      fileInput.value = "";
+    }
+  } else if (fileInput) {
     fileInput.value = "";
   }
+}
 
+function sanitizeValue(value) {
+  if (value === null || value === undefined) {
+    return "";
+  }
+  return typeof value === "string" ? value : String(value);
+}
+
+function sanitizeRow(row) {
+  if (!Array.isArray(row)) {
+    return [];
+  }
+  return row.map((value) => sanitizeValue(value));
+}
+
+function normalizeParsedData(parsed) {
+  const rawHeaders = Array.isArray(parsed.headers) ? parsed.headers : [];
+  const rawRows = Array.isArray(parsed.rows) ? parsed.rows : [];
+  const sanitizedRows = rawRows.map((row) => sanitizeRow(row));
+  let sanitizedHeaders = rawHeaders.map((header) => sanitizeValue(header));
+
+  if (!sanitizedHeaders.length && sanitizedRows.length) {
+    sanitizedHeaders = sanitizedRows.shift() || [];
+  }
+
+  return { headers: sanitizedHeaders, rows: sanitizedRows };
+}
+
+function extractKeywords(rows) {
+  const keywords = new Set();
+  rows.forEach((row) => {
+    row.forEach((cell) => {
+      const value = sanitizeValue(cell).trim();
+      if (value) {
+        keywords.add(value);
+      }
+    });
+  });
+  return Array.from(keywords);
+}
+
+function applyDataset(newHeaders, newRows, fileName) {
+  headers = Array.isArray(newHeaders) ? newHeaders.slice() : [];
+  rawRows = Array.isArray(newRows) ? newRows.map((row) => row.slice()) : [];
+  filteredRows = [...rawRows];
+  buildCaches();
+  currentFileName = fileName || "";
+  controlsSection.hidden = false;
+  resultsSection.hidden = false;
+  renderPage(1);
+}
+
+function getFileExtension(file) {
   if (file.size > MAX_FILE_SIZE) {
-    showError(
+    throw new Error(
       `Le fichier est trop volumineux (${formatBytes(file.size)}). Limite : ${formatBytes(
         MAX_FILE_SIZE
       )}.`
     );
+  }
+  const extension = file.name.split(".").pop()?.toLowerCase();
+  if (!extension || !["csv", "xlsx", "xls"].includes(extension)) {
+    throw new Error("Format non supporté. Seuls les fichiers CSV ou XLSX sont acceptés.");
+  }
+  return extension;
+}
+
+function updateReferenceSummary() {
+  if (!keywordsSummary) {
+    return;
+  }
+  if (!referenceKeywords.length) {
+    keywordsSummary.textContent = "Aucun mot-clé valide trouvé dans le fichier de référence.";
+    return;
+  }
+  if (referenceKeywords.length === 1) {
+    keywordsSummary.textContent = "1 mot-clé extrait du fichier de référence.";
+    return;
+  }
+  keywordsSummary.textContent = `${referenceKeywords.length.toLocaleString()} mots-clés extraits du fichier de référence.`;
+}
+
+function updateComparisonDataset() {
+  if (!comparisonRows.length) {
     return;
   }
 
-  const extension = file.name.split(".").pop()?.toLowerCase();
-  if (!extension || !["csv", "xlsx", "xls"].includes(extension)) {
-    showError("Format non supporté. Seuls les fichiers CSV ou XLSX sont acceptés.");
+  const options = {
+    caseSensitive: Boolean(caseSensitiveToggle.checked),
+    exactMatch: Boolean(exactMatchToggle.checked),
+  };
+
+  const keywordCache = referenceKeywords.map((keyword) => ({
+    original: keyword,
+    normalized: options.caseSensitive ? keyword : keyword.toLowerCase(),
+  }));
+
+  const rowsWithMatches = comparisonRows.map((row) => {
+    const haystack = options.caseSensitive
+      ? row
+      : row.map((value) => value.toLowerCase());
+    const matches = [];
+    keywordCache.forEach((keyword) => {
+      if (!keyword.normalized) {
+        return;
+      }
+      const found = haystack.some((cell) =>
+        options.exactMatch ? cell === keyword.normalized : cell.includes(keyword.normalized)
+      );
+      if (found) {
+        matches.push(keyword.original);
+      }
+    });
+    const outputRow = row.slice();
+    outputRow.push(matches.join(", "));
+    return outputRow;
+  });
+
+  const headersWithMatches = [...comparisonHeaders, "Mots-clés trouvés"];
+  const fileLabel = comparisonFileName ? `${comparisonFileName}_comparaison` : "comparaison";
+  applyDataset(headersWithMatches, rowsWithMatches, fileLabel);
+  updateReferenceSummary();
+  updateProgress(100, "Comparaison terminée");
+  if (searchInput.value.trim()) {
+    performSearch();
+  }
+}
+
+async function handleSingleFile(files) {
+  const [file] = files ? Array.from(files).filter(Boolean) : [];
+  if (!file) return;
+  clearError();
+  clearComparisonState();
+  if (fileInput) {
+    fileInput.value = "";
+  }
+
+  let extension;
+  try {
+    extension = getFileExtension(file);
+  } catch (validationError) {
+    showError(validationError.message);
     return;
   }
 
   currentFileName = file.name.replace(/\.[^.]+$/, "");
-  updateProgress(0, "Préparation...");
+  updateProgress(0, "Préparation du fichier...");
 
   try {
-    let parsed;
-    if (extension === "csv") {
-      parsed = await parseCsv(file);
-    } else {
-      parsed = await parseXlsx(file);
-    }
-
-    ({ headers, rows: rawRows } = parsed);
-    if (!headers || headers.length === 0) {
-      headers = rawRows.shift() || [];
-    }
-    if (!rawRows || rawRows.length === 0) {
+    const parsed =
+      extension === "csv" ? await parseCsv(file) : await parseXlsx(file);
+    const { headers: parsedHeaders, rows } = normalizeParsedData(parsed);
+    if (!rows.length) {
       showError("Aucune donnée trouvée dans le fichier.");
+      resetDataset();
       return;
     }
 
-    buildCaches();
-    filteredRows = [...rawRows];
-    controlsSection.hidden = false;
-    resultsSection.hidden = false;
-    renderPage(1);
+    applyDataset(parsedHeaders, rows, currentFileName);
   } catch (error) {
     console.error(error);
     showError(
       "Impossible de lire le fichier. Vérifiez son encodage ou son intégrité et réessayez."
     );
+    resetDataset();
   } finally {
     updateProgress(100, "Chargement terminé");
+  }
+}
+
+async function handleReferenceFiles(files) {
+  const [file] = files ? Array.from(files).filter(Boolean) : [];
+  if (!file) return;
+  clearError();
+  if (referenceInput) {
+    referenceInput.value = "";
+  }
+
+  let extension;
+  try {
+    extension = getFileExtension(file);
+  } catch (validationError) {
+    showError(validationError.message);
+    return;
+  }
+
+  referenceName.textContent = file.name;
+  referenceFileName = file.name.replace(/\.[^.]+$/, "");
+  updateProgress(0, "Préparation du fichier de référence...");
+
+  try {
+    const parsed =
+      extension === "csv" ? await parseCsv(file) : await parseXlsx(file);
+    const { rows } = normalizeParsedData(parsed);
+    if (!rows.length) {
+      referenceKeywords = [];
+      updateReferenceSummary();
+      showError("Aucune donnée trouvée dans le fichier de référence.");
+      resetDataset();
+      return;
+    }
+
+    referenceKeywords = extractKeywords(rows);
+    updateReferenceSummary();
+
+    if (!comparisonRows.length) {
+      resetDataset();
+      updateProgress(100, "Fichier de référence chargé");
+    } else {
+      updateComparisonDataset();
+    }
+  } catch (error) {
+    console.error(error);
+    showError(
+      "Impossible de lire le fichier de référence. Vérifiez son encodage ou son intégrité et réessayez."
+    );
+  }
+}
+
+async function handleComparisonFiles(files) {
+  const [file] = files ? Array.from(files).filter(Boolean) : [];
+  if (!file) return;
+  clearError();
+  if (comparisonInput) {
+    comparisonInput.value = "";
+  }
+
+  let extension;
+  try {
+    extension = getFileExtension(file);
+  } catch (validationError) {
+    showError(validationError.message);
+    return;
+  }
+
+  comparisonName.textContent = file.name;
+  comparisonFileName = file.name.replace(/\.[^.]+$/, "");
+  updateProgress(0, "Préparation du fichier à comparer...");
+
+  try {
+    const parsed =
+      extension === "csv" ? await parseCsv(file) : await parseXlsx(file);
+    const { headers: parsedHeaders, rows } = normalizeParsedData(parsed);
+    if (!rows.length) {
+      comparisonRows = [];
+      comparisonHeaders = parsedHeaders;
+      resetDataset();
+      showError("Aucune donnée trouvée dans le fichier à comparer.");
+      return;
+    }
+
+    comparisonHeaders = parsedHeaders;
+    comparisonRows = rows;
+
+    if (!referenceKeywords.length) {
+      resetDataset();
+      updateProgress(100, "Fichier à comparer chargé");
+    } else {
+      updateComparisonDataset();
+    }
+  } catch (error) {
+    console.error(error);
+    showError(
+      "Impossible de lire le fichier à comparer. Vérifiez son encodage ou son intégrité et réessayez."
+    );
+  }
+}
+
+async function handleCompareDrop(files) {
+  const fileList = Array.from(files || []).filter(Boolean);
+  if (!fileList.length) {
+    return;
+  }
+
+  if (fileList.length >= 2) {
+    await handleReferenceFiles([fileList[0]]);
+    await handleComparisonFiles([fileList[1]]);
+    return;
+  }
+
+  if (!referenceKeywords.length) {
+    await handleReferenceFiles([fileList[0]]);
+  } else {
+    await handleComparisonFiles([fileList[0]]);
   }
 }
 
@@ -438,8 +728,12 @@ function resetSearch() {
   searchInput.value = "";
   caseSensitiveToggle.checked = false;
   exactMatchToggle.checked = false;
-  filteredRows = [...rawRows];
-  renderPage(1);
+  if (currentMode === "compare" && comparisonRows.length) {
+    updateComparisonDataset();
+  } else {
+    filteredRows = [...rawRows];
+    renderPage(1);
+  }
 }
 
 function getCurrentPageRows() {
@@ -512,7 +806,6 @@ function exportXlsx(rows) {
 
 function attachEvents() {
   if (
-    !fileInput ||
     !dropZone ||
     !searchButton ||
     !resetButton ||
@@ -524,12 +817,53 @@ function attachEvents() {
   ) {
     return;
   }
-  fileInput.addEventListener("change", (event) => {
-    const files = event.target.files;
-    handleFiles(files);
+
+  if (fileInput) {
+    fileInput.addEventListener("change", (event) => {
+      handleSingleFile(event.target.files);
+    });
+  }
+
+  if (referenceInput) {
+    referenceInput.addEventListener("change", (event) => {
+      handleReferenceFiles(event.target.files);
+    });
+  }
+
+  if (comparisonInput) {
+    comparisonInput.addEventListener("change", (event) => {
+      handleComparisonFiles(event.target.files);
+    });
+  }
+
+  modeRadios.forEach((radio) => {
+    radio.addEventListener("change", (event) => {
+      if (event.target.checked) {
+        setMode(event.target.value);
+      }
+    });
   });
 
-  ;["dragenter", "dragover"].forEach((eventName) => {
+  const activeMode = modeRadios.find((radio) => radio.checked)?.value;
+  if (activeMode === "compare") {
+    currentMode = "compare";
+    if (singleUploadContainer) {
+      singleUploadContainer.hidden = true;
+    }
+    if (compareUploadContainer) {
+      compareUploadContainer.hidden = false;
+    }
+  } else {
+    currentMode = "single";
+    if (singleUploadContainer) {
+      singleUploadContainer.hidden = false;
+    }
+    if (compareUploadContainer) {
+      compareUploadContainer.hidden = true;
+    }
+  }
+
+  ["dragenter", "dragover"].forEach((eventName) => {
     dropZone.addEventListener(eventName, (event) => {
       event.preventDefault();
       event.stopPropagation();
@@ -537,7 +871,7 @@ function attachEvents() {
     });
   });
 
-  ;["dragleave", "drop"].forEach((eventName) => {
+  ["dragleave", "drop"].forEach((eventName) => {
     dropZone.addEventListener(eventName, (event) => {
       event.preventDefault();
       event.stopPropagation();
@@ -545,9 +879,13 @@ function attachEvents() {
     });
   });
 
-  dropZone.addEventListener("drop", (event) => {
+  dropZone.addEventListener("drop", async (event) => {
     const files = event.dataTransfer?.files;
-    handleFiles(files);
+    if (currentMode === "compare") {
+      await handleCompareDrop(files);
+    } else {
+      await handleSingleFile(files);
+    }
   });
 
   searchButton.addEventListener("click", performSearch);
@@ -562,6 +900,22 @@ function attachEvents() {
     resetSearch();
     clearError();
   });
+
+  if (caseSensitiveToggle && typeof caseSensitiveToggle.addEventListener === "function") {
+    caseSensitiveToggle.addEventListener("change", () => {
+      if (currentMode === "compare" && comparisonRows.length) {
+        updateComparisonDataset();
+      }
+    });
+  }
+
+  if (exactMatchToggle && typeof exactMatchToggle.addEventListener === "function") {
+    exactMatchToggle.addEventListener("change", () => {
+      if (currentMode === "compare" && comparisonRows.length) {
+        updateComparisonDataset();
+      }
+    });
+  }
 
   prevPageBtn.addEventListener("click", () => {
     if (currentPage > 1) {
@@ -629,6 +983,8 @@ if (typeof module !== "undefined" && module.exports) {
     matchRow,
     convertRowsToCsv,
     buildCaches,
+    normalizeParsedData,
+    extractKeywords,
     __setTestState,
     __getTestState,
   };
